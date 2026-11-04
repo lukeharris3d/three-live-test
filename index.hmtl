@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>Three-Live GLB Viewer</title>
+  <title>Three-Live Custom HDR & Skybox Viewer</title>
   <style>
     html, body {
       margin: 0;
@@ -11,28 +11,23 @@
       width: 100%;
       height: 100%;
       overflow: hidden;
-      background-color: #ffffff;
+      background-color: #111111;
     }
     three-live {
       width: 100vw;
       height: 100vh;
       display: block;
-      background-color: #ffffff;
     }
   </style>
-  <!-- Load Google's official Three-Live Full Bundle -->
-  <script type="module" src="https://google.github.io/three-live/dist/three-live-full.min.js"></script>
+  <!-- Load xr-live-full.min.js which includes three-live-full PLUS the Skybox plugin -->
+  <script type="module" src="https://google.github.io/three-live/dist/xr-live-full.min.js"></script>
 </head>
 <body>
 
-  <!-- 
-    shadow-intensity="0.25" reduces shadow darkness (0.0 to 1.0)
-    shadow-softness="0.8" makes the shadow edges softer (0.0 to 1.0)
-  -->
   <three-live 
     id="viewer"
     src="https://raw.githubusercontent.com/lukeharris3d/babylon/main/glb/JCS_004.glb" 
-    environment-image="https://raw.githubusercontent.com/google/model-viewer/master/packages/shared-assets/environments/neutral.hdr"
+    environment-image="https://raw.githubusercontent.com/lukeharris3d/three-live-test/main/hdr/debris_basement_corridor.hdr"
     shadow-intensity="0.25"
     shadow-softness="0.8"
     exposure="1.0"
@@ -42,18 +37,155 @@
 
   <script>
     const viewer = document.getElementById('viewer');
+    const HDR_URL = viewer.getAttribute('environment-image');
 
-    // Custom slow orbit animation (adjust DEGREES_PER_SECOND to taste)
-    const DEGREES_PER_SECOND = 8; 
+    // =========================================================================
+    // 🎨 HDR GAMMA, EXPOSURE & ORIENTATION SETTINGS
+    // =========================================================================
+    const HDR_GAMMA = 1.0;            // Standard sRGB is 2.2
+    const HDR_SKYBOX_EXPOSURE = 1.0;  // Brightness of the HDR background skybox
+    const MODEL_IBL_EXPOSURE = 1.0;   // Brightness of the 3D model's IBL lighting
+    const FLIP_SKYBOX_Y = true;       // Flips the skybox vertically to match WebGL UV orientation
+    const DEGREES_PER_SECOND = 8;     // Orbit rotation speed
+
+    // Apply model exposure
+    viewer.setAttribute('exposure', String(MODEL_IBL_EXPOSURE));
+
+    // --- 1. PARSE RADIANCE .HDR & CONVERT TO SKYBOX IMAGE ---
+    function decodeRGBEToCanvas(buffer, exposure = 1.0, gamma = 2.2, flipY = true) {
+      const bytes = new Uint8Array(buffer);
+      let pos = 0;
+
+      function readLine() {
+        let line = '';
+        while (pos < bytes.length) {
+          const ch = bytes[pos++];
+          if (ch === 10) break; // '\n'
+          if (ch !== 13) line += String.fromCharCode(ch);
+        }
+        return line;
+      }
+
+      // Read header lines until empty line
+      let headerLine = readLine();
+      if (!headerLine.startsWith('#?')) throw new Error('Invalid Radiance HDR header');
+      while (pos < bytes.length) {
+        const line = readLine();
+        if (line.trim() === '') break;
+      }
+
+      // Read resolution line (e.g. "-Y 1024 +X 2048")
+      const resLine = readLine();
+      const match = resLine.match(/-Y\s+(\d+)\s+\+X\s+(\d+)/i);
+      if (!match) throw new Error('Unsupported HDR resolution format: ' + resLine);
+      const height = parseInt(match[1], 10);
+      const width = parseInt(match[2], 10);
+
+      const rgbe = new Uint8Array(width * height * 4);
+      let ptr = 0;
+
+      // Decode scanlines (supports New RLE and uncompressed)
+      for (let y = 0; y < height; y++) {
+        if (bytes[pos] === 2 && bytes[pos + 1] === 2 && ((bytes[pos + 2] << 8) | bytes[pos + 3]) === width) {
+          pos += 4;
+          for (let ch = 0; ch < 4; ch++) {
+            let x = 0;
+            while (x < width) {
+              const code = bytes[pos++];
+              if (code > 128) {
+                const count = code - 128;
+                const val = bytes[pos++];
+                for (let i = 0; i < count; i++) rgbe[(y * width + x++) * 4 + ch] = val;
+              } else {
+                for (let i = 0; i < code; i++) rgbe[(y * width + x++) * 4 + ch] = bytes[pos++];
+              }
+            }
+          }
+        } else {
+          for (let x = 0; x < width * 4; x++) rgbe[ptr++] = bytes[pos++];
+        }
+      }
+
+      // Tone-map RGBE to Canvas using custom exposure, gamma, and vertical flip
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      const imgData = ctx.createImageData(width, height);
+      const out = imgData.data;
+      const invGamma = 1.0 / gamma;
+
+      for (let y = 0; y < height; y++) {
+        const dstY = flipY ? (height - 1 - y) : y;
+        for (let x = 0; x < width; x++) {
+          const srcIdx = (y * width + x) * 4;
+          const dstIdx = (dstY * width + x) * 4;
+          const e = rgbe[srcIdx + 3];
+
+          if (e === 0) {
+            out[dstIdx] = out[dstIdx + 1] = out[dstIdx + 2] = 0;
+            out[dstIdx + 3] = 255;
+          } else {
+            const scale = Math.pow(2.0, e - 128.0 - 8.0) * exposure;
+            let r = rgbe[srcIdx] * scale;
+            let g = rgbe[srcIdx + 1] * scale;
+            let b = rgbe[srcIdx + 2] * scale;
+            // Reinhard tone mapping + custom gamma curve
+            r = Math.pow(r / (1.0 + r), invGamma);
+            g = Math.pow(g / (1.0 + g), invGamma);
+            b = Math.pow(b / (1.0 + b), invGamma);
+            out[dstIdx]     = Math.min(255, Math.max(0, Math.round(r * 255)));
+            out[dstIdx + 1] = Math.min(255, Math.max(0, Math.round(g * 255)));
+            out[dstIdx + 2] = Math.min(255, Math.max(0, Math.round(b * 255)));
+            out[dstIdx + 3] = 255;
+          }
+        }
+      }
+
+      ctx.putImageData(imgData, 0, 0);
+      return { dataUrl: canvas.toDataURL('image/jpeg', 0.92), width, height };
+    }
+
+    async function loadAndApplyHdrSkybox(url) {
+      console.group('🔍 HDR Environment & Skybox Check');
+      try {
+        const start = performance.now();
+        const response = await fetch(url, { mode: 'cors' });
+        if (!response.ok) throw new Error(`HTTP ${response.status} ${response.statusText}`);
+
+        const buffer = await response.arrayBuffer();
+        const sizeMB = (buffer.byteLength / (1024 * 1024)).toFixed(2);
+        console.log(`✅ HDR Downloaded (${sizeMB} MB in ${(performance.now() - start).toFixed(0)}ms)`);
+
+        // Convert .hdr into a tone-mapped equirectangular JPEG with vertical flip
+        const { dataUrl, width, height } = decodeRGBEToCanvas(
+          buffer,
+          HDR_SKYBOX_EXPOSURE,
+          HDR_GAMMA,
+          FLIP_SKYBOX_Y
+        );
+        console.log(`✅ HDR Decoded (${width}x${height}) | Gamma: ${HDR_GAMMA} | FlipY: ${FLIP_SKYBOX_Y}`);
+
+        viewer.setAttribute('skybox-image', dataUrl);
+      } catch (err) {
+        console.error('❌ HDR Load/Decode Error:', err);
+      }
+      console.groupEnd();
+    }
+
+    loadAndApplyHdrSkybox(HDR_URL);
+
+    // --- 2. SLOW ORBIT ANIMATION ---
     let isUserInteracting = false;
     let lastTime = performance.now();
 
-    // Pause auto-rotation while the user is dragging/interacting
     viewer.addEventListener('pointerdown', () => { isUserInteracting = true; });
     window.addEventListener('pointerup', () => { isUserInteracting = false; });
+    viewer.addEventListener('touchstart', () => { isUserInteracting = true; }, { passive: true });
+    window.addEventListener('touchend', () => { isUserInteracting = false; });
 
     viewer.addEventListener('load', () => {
-      console.log('GLB Model loaded successfully!');
+      console.log('✅ GLB Model loaded into <three-live>!');
       lastTime = performance.now();
 
       function slowRotate(now) {
@@ -61,7 +193,7 @@
         lastTime = now;
 
         if (!isUserInteracting && typeof viewer.getCameraOrbit === 'function') {
-          const orbit = viewer.getCameraOrbit(); // returns { theta, phi, radius } in radians/meters
+          const orbit = viewer.getCameraOrbit(); 
           const deltaRad = (DEGREES_PER_SECOND * Math.PI / 180) * dt;
           const newThetaDeg = ((orbit.theta + deltaRad) * 180) / Math.PI;
           const phiDeg = (orbit.phi * 180) / Math.PI;
@@ -74,7 +206,7 @@
       requestAnimationFrame(slowRotate);
     });
 
-    viewer.addEventListener('error', (e) => console.error('Three-Live Error:', e.detail));
+    viewer.addEventListener('error', (e) => console.error('❌ Three-Live Error:', e.detail || e));
   </script>
 
 </body>
