@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Three-Live GLB Viewer</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background-color: #ffffff;
+    }
+    three-live {
+      width: 100vw;
+      height: 100vh;
+      display: block;
+      background-color: #ffffff;
+    }
+  </style>
+  <!-- Load Google's official Three-Live Full Bundle -->
+  <script type="module" src="https://google.github.io/three-live/dist/three-live-full.min.js"></script>
+</head>
+<body>
+
+  <!-- 
+    shadow-intensity="0.25" reduces shadow darkness (0.0 to 1.0)
+    shadow-softness="0.8" makes the shadow edges softer (0.0 to 1.0)
+  -->
+  <three-live 
+    id="viewer"
+    src="https://raw.githubusercontent.com/lukeharris3d/babylon/main/glb/JCS_004.glb" 
+    environment-image="https://raw.githubusercontent.com/google/model-viewer/master/packages/shared-assets/environments/neutral.hdr"
+    shadow-intensity="0.25"
+    shadow-softness="0.8"
+    exposure="1.0"
+    camera-controls 
+    ar>
+  </three-live>
+
+  <script>
+    const viewer = document.getElementById('viewer');
+
+    // Custom slow orbit animation (adjust DEGREES_PER_SECOND to taste)
+    const DEGREES_PER_SECOND = 8; 
+    let isUserInteracting = false;
+    let lastTime = performance.now();
+
+    // Pause auto-rotation while the user is dragging/interacting
+    viewer.addEventListener('pointerdown', () => { isUserInteracting = true; });
+    window.addEventListener('pointerup', () => { isUserInteracting = false; });
+
+    viewer.addEventListener('load', () => {
+      console.log('GLB Model loaded successfully!');
+      lastTime = performance.now();
+
+      function slowRotate(now) {
+        const dt = (now - lastTime) / 1000;
+        lastTime = now;
+
+        if (!isUserInteracting && typeof viewer.getCameraOrbit === 'function') {
+          const orbit = viewer.getCameraOrbit(); // returns { theta, phi, radius } in radians/meters
+          const deltaRad = (DEGREES_PER_SECOND * Math.PI / 180) * dt;
+          const newThetaDeg = ((orbit.theta + deltaRad) * 180) / Math.PI;
+          const phiDeg = (orbit.phi * 180) / Math.PI;
+
+          viewer.setAttribute('camera-orbit', `${newThetaDeg}deg ${phiDeg}deg ${orbit.radius}m`);
+        }
+        requestAnimationFrame(slowRotate);
+      }
+
+      requestAnimationFrame(slowRotate);
+    });
+
+    viewer.addEventListener('error', (e) => console.error('Three-Live Error:', e.detail));
+  </script>
+
+</body>
+</html>
